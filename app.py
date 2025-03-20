@@ -13,8 +13,8 @@ from datetime import datetime, timedelta
 app = Flask(__name__)
 
 # 從環境變數取得設定
-channel_secret = os.environ.get('LINE_CHANNEL_SECRET', '您的 Channel Secret')
-channel_access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '您的 Channel Access Token')
+channel_secret = os.environ.get('LINE_CHANNEL_SECRET', '3d4224a4cb32b140610545e6d155cc0d')
+channel_access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', 'YCffcEj/7aUw33XPEtfVMuKf1l5i5ztIHLibGTy2zGuyNgLf1RXJCqA8dVhbMp8Yxbwsr1CP6EfJID8htKS/Q3io/WSfp/gtDcaRfDT/TNErwymfiIdGWdLROcBkTfRN7hXFqHVrDQ+WgkkMGFWc3AdB04t89/1O/w1cDnyilFU=')
 
 line_bot_api = LineBotApi(channel_access_token)
 handler = WebhookHandler(channel_secret)
