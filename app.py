@@ -1,234 +1,591 @@
-from flask import Flask, request, abort
+import os
+import json
+import datetime
+from flask import Flask, request, abort, redirect, url_for
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import (
     MessageEvent, TextMessage, TextSendMessage,
-    TemplateSendMessage, ButtonsTemplate, DatetimePickerTemplateAction,
-    PostbackEvent, PostbackTemplateAction
+    TemplateSendMessage, ButtonsTemplate, PostbackEvent,
+    PostbackTemplateAction, MessageTemplateAction, URITemplateAction,
+    CarouselTemplate, CarouselColumn, DatetimePickerTemplateAction
 )
-import os
-import json
-from datetime import datetime, timedelta
+import pytz
+import requests
+import uuid
+from urllib.parse import urlencode
+from dotenv import load_dotenv
+
+# 加載.env文件中的環境變量(本地開發使用)
+load_dotenv()
 
 app = Flask(__name__)
 
-# 從環境變數取得設定
-channel_secret = os.environ.get('LINE_CHANNEL_SECRET', '3d4224a4cb32b140610545e6d155cc0d')
-channel_access_token = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', 'YCffcEj/7aUw33XPEtfVMuKf1l5i5ztIHLibGTy2zGuyNgLf1RXJCqA8dVhbMp8Yxbwsr1CP6EfJID8htKS/Q3io/WSfp/gtDcaRfDT/TNErwymfiIdGWdLROcBkTfRN7hXFqHVrDQ+WgkkMGFWc3AdB04t89/1O/w1cDnyilFU=')
+# LINE Bot設定
+LINE_CHANNEL_SECRET = os.environ.get('LINE_CHANNEL_SECRET', '')
+LINE_CHANNEL_ACCESS_TOKEN = os.environ.get('LINE_CHANNEL_ACCESS_TOKEN', '')
 
-line_bot_api = LineBotApi(channel_access_token)
-handler = WebhookHandler(channel_secret)
+# Google Calendar API設定
+GOOGLE_CALENDAR_CLIENT_ID = os.environ.get('GOOGLE_CALENDAR_CLIENT_ID', '')
+GOOGLE_CALENDAR_CLIENT_SECRET = os.environ.get('GOOGLE_CALENDAR_CLIENT_SECRET', '')
+GOOGLE_CALENDAR_REDIRECT_URI = os.environ.get('GOOGLE_CALENDAR_REDIRECT_URI', '')
+GOOGLE_CALENDAR_ID = os.environ.get('GOOGLE_CALENDAR_ID', '')
 
-# 儲存預約資訊 (實際應用建議使用資料庫)
-bookings = {}
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# 服務項目
-services = {
-    "臉部護理": ["基礎護理", "深層清潔", "抗衰老護理", "亮白護理"],
-    "美甲服務": ["基本美甲", "凝膠美甲", "卸甲服務"],
-    "美髮服務": ["剪髮", "染髮", "燙髮", "護髮"]
+# 模擬資料庫
+shops = {
+    'shop1': {'name': '台北店', 'services': ['剪髮', '染髮', '護髮', '造型']},
+    'shop2': {'name': '新北店', 'services': ['剪髮', '染髮', '護髮']},
+    'shop3': {'name': '桃園店', 'services': ['剪髮', '染髮']}
 }
 
-# 營業時間
-business_hours = {
-    "start": 10,  # 上午 10 點
-    "end": 20,    # 晚上 8 點
-    "interval": 60 # 每個時段間隔(分鐘)
+stylists = {
+    'shop1': {'stylist1': '設計師Amy', 'stylist2': '設計師Bob', 'stylist3': '設計師Carol'},
+    'shop2': {'stylist1': '設計師David', 'stylist2': '設計師Eva'},
+    'shop3': {'stylist1': '設計師Frank'}
 }
+
+# 服務時長（小時）
+service_duration = {
+    '剪髮': 1,
+    '染髮': 2,
+    '護髮': 1,
+    '造型': 1.5
+}
+
+# 使用者狀態追蹤
+user_states = {}
+
+# 暫存預約信息，等待Google Calendar授權
+pending_bookings = {}
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    # 取得 X-Line-Signature header 值
     signature = request.headers['X-Line-Signature']
-
-    # 取得請求內容
     body = request.get_data(as_text=True)
     app.logger.info("Request body: " + body)
-
-    # 處理 webhook
+    
     try:
         handler.handle(body, signature)
     except InvalidSignatureError:
+        print("Invalid signature. Please check your channel access token/channel secret.")
         abort(400)
-
+    
     return 'OK'
+
+@app.route("/google_auth", methods=['GET'])
+def google_auth():
+    """Google OAuth認證回調處理"""
+    code = request.args.get('code')
+    state = request.args.get('state')
+    
+    if not code or not state or state not in pending_bookings:
+        return "認證失敗，請重新嘗試預約", 400
+    
+    # 使用認證碼獲取訪問令牌
+    token_url = "https://oauth2.googleapis.com/token"
+    token_data = {
+        "code": code,
+        "client_id": GOOGLE_CALENDAR_CLIENT_ID,
+        "client_secret": GOOGLE_CALENDAR_CLIENT_SECRET,
+        "redirect_uri": GOOGLE_CALENDAR_REDIRECT_URI,
+        "grant_type": "authorization_code"
+    }
+    
+    token_response = requests.post(token_url, data=token_data)
+    
+    if token_response.status_code != 200:
+        return "無法獲取訪問令牌，請重新嘗試", 400
+    
+    tokens = token_response.json()
+    access_token = tokens.get('access_token')
+    
+    # 向Google日曆添加事件
+    booking_info = pending_bookings[state]
+    
+    # 創建Google日曆事件
+    create_google_calendar_event(access_token, booking_info)
+    
+    # 發送LINE訊息，通知用戶預約成功
+    send_booking_confirmation(booking_info)
+    
+    # 移除暫存預約信息
+    del pending_bookings[state]
+    
+    return "預約已成功添加到Google日曆，請返回LINE查看確認通知", 200
+
+def create_google_calendar_event(access_token, booking_info):
+    """創建Google日曆事件"""
+    calendar_api_url = f"https://www.googleapis.com/calendar/v3/calendars/{GOOGLE_CALENDAR_ID}/events"
+    headers = {
+        "Authorization": f"Bearer {access_token}",
+        "Content-Type": "application/json"
+    }
+    
+    # 計算服務結束時間
+    start_datetime = datetime.datetime.strptime(f"{booking_info['date']} {booking_info['time']}", "%Y-%m-%d %H:%M")
+    service_hours = service_duration.get(booking_info['service'], 1)
+    end_datetime = start_datetime + datetime.timedelta(hours=service_hours)
+    
+    # 創建事件數據
+    event_data = {
+        "summary": f"{booking_info['service']}預約 - {booking_info['customer_name']}",
+        "description": f"服務項目: {booking_info['service']}\n"
+                       f"店鋪: {booking_info['shop']}\n"
+                       f"設計師: {booking_info['stylist']}\n"
+                       f"客戶LINE ID: {booking_info['user_id']}",
+        "start": {
+            "dateTime": start_datetime.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timeZone": "Asia/Taipei"
+        },
+        "end": {
+            "dateTime": end_datetime.strftime("%Y-%m-%dT%H:%M:%S"),
+            "timeZone": "Asia/Taipei"
+        }
+    }
+    
+    response = requests.post(calendar_api_url, headers=headers, json=event_data)
+    
+    if response.status_code not in [200, 201]:
+        app.logger.error(f"無法創建Google日曆事件: {response.text}")
+        return False
+    
+    event = response.json()
+    booking_info['calendar_event_id'] = event.get('id')
+    booking_info['calendar_event_link'] = event.get('htmlLink')
+    
+    return True
+
+def send_booking_confirmation(booking_info):
+    """發送預約確認訊息到LINE"""
+    user_id = booking_info['user_id']
+    
+    success_message = f"預約成功！\n\n" \
+                     f"服務項目：{booking_info['service']}\n" \
+                     f"預約店鋪：{booking_info['shop']}\n" \
+                     f"預約設計師：{booking_info['stylist']}\n" \
+                     f"預約日期：{booking_info['date']}\n" \
+                     f"預約時間：{booking_info['time']}\n\n"
+    
+    if booking_info.get('calendar_event_link'):
+        success_message += f"Google日曆連結: {booking_info['calendar_event_link']}\n\n"
+    
+    success_message += "期待您的光臨！"
+    
+    line_bot_api.push_message(
+        user_id,
+        TextSendMessage(text=success_message)
+    )
+    
+    # 重置用戶狀態
+    if user_id in user_states:
+        user_states[user_id] = {
+            'step': 'init',
+            'shop': None,
+            'service': None,
+            'stylist': None,
+            'date': None,
+            'time': None
+        }
 
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
-    text = event.message.text
     user_id = event.source.user_id
-
-    if text == "預約服務":
-        # 顯示服務類別選單
-        service_categories = list(services.keys())
-        buttons_template = ButtonsTemplate(
-            title='美容服務預約',
-            text='請選擇服務類別',
-            actions=[
-                PostbackTemplateAction(
-                    label=category,
-                    data=f"category_{category}"
-                ) for category in service_categories
-            ]
-        )
-        template_message = TemplateSendMessage(
-            alt_text='服務類別選擇',
-            template=buttons_template
-        )
-        line_bot_api.reply_message(event.reply_token, template_message)
+    text = event.message.text
     
-    elif text == "查詢預約":
-        # 查詢用戶預約
-        if user_id in bookings:
-            booking_info = bookings[user_id]
-            message = f"您的預約資訊:\n服務: {booking_info['service']}\n日期: {booking_info['date']}\n時間: {booking_info['time']}"
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text=message)
-            )
+    # 初始化用戶狀態
+    if user_id not in user_states:
+        user_states[user_id] = {
+            'step': 'init',
+            'shop': None,
+            'service': None,
+            'stylist': None,
+            'date': None,
+            'time': None
+        }
+    
+    # 根據用戶當前狀態處理消息
+    if text == "預約美容服務":
+        # 顯示服務選項
+        show_service_selection(event, user_id)
+    elif user_states[user_id]['step'] == 'selecting_service' and text in ['剪髮', '染髮', '護髮', '造型']:
+        # 用戶選擇了服務
+        user_states[user_id]['service'] = text
+        user_states[user_id]['step'] = 'selecting_shop'
+        show_shop_selection(event, user_id)
+    elif user_states[user_id]['step'] == 'selecting_shop' and any(shop['name'] == text for shop in shops.values()):
+        # 用戶選擇了店鋪
+        shop_id = next(k for k, v in shops.items() if v['name'] == text)
+        user_states[user_id]['shop'] = shop_id
+        user_states[user_id]['step'] = 'selecting_stylist'
+        show_stylist_selection(event, user_id)
+    elif user_states[user_id]['step'] == 'selecting_stylist':
+        # 用戶選擇了設計師或不指定
+        shop_id = user_states[user_id]['shop']
+        if text == "不指定設計師":
+            user_states[user_id]['stylist'] = "any"
+        elif text in stylists[shop_id].values():
+            stylist_id = next(k for k, v in stylists[shop_id].items() if v == text)
+            user_states[user_id]['stylist'] = stylist_id
         else:
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="您目前沒有預約。")
+                TextSendMessage(text="請選擇有效的設計師")
             )
-    
-    elif text == "取消預約":
-        # 取消用戶預約
-        if user_id in bookings:
-            del bookings[user_id]
+            return
+            
+        user_states[user_id]['step'] = 'selecting_date'
+        show_date_selection(event, user_id)
+    elif user_states[user_id]['step'] == 'entering_name':
+        # 用戶輸入姓名
+        user_states[user_id]['customer_name'] = text
+        user_states[user_id]['step'] = 'confirming'
+        show_booking_confirmation(event, user_id)
+    elif user_states[user_id]['step'] == 'confirming':
+        if text == "確認預約":
+            # 處理預約確認
+            confirm_booking(event, user_id)
+        elif text == "取消預約":
+            # 重置狀態
+            user_states[user_id] = {
+                'step': 'init',
+                'shop': None,
+                'service': None,
+                'stylist': None,
+                'date': None,
+                'time': None
+            }
             line_bot_api.reply_message(
                 event.reply_token,
-                TextSendMessage(text="您的預約已取消。")
+                TextSendMessage(text="預約已取消，您可以重新開始預約流程。")
             )
-        else:
-            line_bot_api.reply_message(
-                event.reply_token,
-                TextSendMessage(text="您目前沒有預約。")
-            )
-    
     else:
-        # 預設回覆
-        message = "您好！我是美容預約助手，可以幫您:\n1. 輸入「預約服務」開始預約\n2. 輸入「查詢預約」查看您的預約\n3. 輸入「取消預約」取消現有預約"
+        # 預設回應
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=message)
+            TextSendMessage(text="您好！請輸入「預約美容服務」開始預約流程。")
         )
 
 @handler.add(PostbackEvent)
 def handle_postback(event):
-    data = event.postback.data
     user_id = event.source.user_id
+    data = event.postback.data
     
-    # 處理服務類別選擇
-    if data.startswith("category_"):
-        category = data.replace("category_", "")
+    if user_id not in user_states:
+        user_states[user_id] = {
+            'step': 'init',
+            'shop': None,
+            'service': None,
+            'stylist': None,
+            'date': None,
+            'time': None
+        }
+    
+    # 解析 postback 數據
+    if data.startswith('date_'):
+        # 用戶選擇了日期
+        selected_date = data.replace('date_', '')
+        user_states[user_id]['date'] = selected_date
+        user_states[user_id]['step'] = 'selecting_time'
+        show_time_selection(event, user_id)
+    elif data.startswith('time_'):
+        # 用戶選擇了時間
+        selected_time = data.replace('time_', '')
+        user_states[user_id]['time'] = selected_time
+        user_states[user_id]['step'] = 'entering_name'
         
-        # 顯示此類別下的服務項目
-        service_items = services[category]
+        # 請用戶輸入姓名
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="請輸入您的姓名，以完成預約")
+        )
+    elif data == 'datetime_picker':
+        # 處理日期時間選擇器
+        date = event.postback.params['date']
+        time = event.postback.params.get('time', '12:00')
+        
+        user_states[user_id]['date'] = date
+        user_states[user_id]['time'] = time
+        user_states[user_id]['step'] = 'entering_name'
+        
+        # 請用戶輸入姓名
+        line_bot_api.reply_message(
+            event.reply_token,
+            TextSendMessage(text="請輸入您的姓名，以完成預約")
+        )
+
+def show_service_selection(event, user_id):
+    user_states[user_id]['step'] = 'selecting_service'
+    
+    buttons_template = ButtonsTemplate(
+        title='選擇服務項目',
+        text='請選擇您需要的服務',
+        actions=[
+            MessageTemplateAction(label='剪髮', text='剪髮'),
+            MessageTemplateAction(label='染髮', text='染髮'),
+            MessageTemplateAction(label='護髮', text='護髮'),
+            MessageTemplateAction(label='造型', text='造型')
+        ]
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='選擇服務項目',
+        template=buttons_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def show_shop_selection(event, user_id):
+    actions = []
+    for shop_id, shop_info in shops.items():
+        # 檢查該店是否提供所選服務
+        if user_states[user_id]['service'] in shop_info['services']:
+            actions.append(MessageTemplateAction(
+                label=shop_info['name'],
+                text=shop_info['name']
+            ))
+    
+    buttons_template = ButtonsTemplate(
+        title='選擇美容院',
+        text='請選擇您想預約的店鋪',
+        actions=actions
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='選擇美容院',
+        template=buttons_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def show_stylist_selection(event, user_id):
+    shop_id = user_states[user_id]['shop']
+    
+    actions = [MessageTemplateAction(label='不指定設計師', text='不指定設計師')]
+    for stylist_id, stylist_name in stylists[shop_id].items():
+        actions.append(MessageTemplateAction(
+            label=stylist_name,
+            text=stylist_name
+        ))
+    
+    buttons_template = ButtonsTemplate(
+        title='選擇美容師',
+        text='請選擇您想預約的設計師',
+        actions=actions[:4]  # LINE限制最多4個按鈕
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='選擇美容師',
+        template=buttons_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def show_date_selection(event, user_id):
+    # 生成未來7天的日期選項
+    today = datetime.datetime.now(pytz.timezone('Asia/Taipei'))
+    date_actions = []
+    
+    for i in range(1, 8):  # 從明天開始的7天
+        future_date = today + datetime.timedelta(days=i)
+        date_str = future_date.strftime('%Y-%m-%d')
+        display_str = future_date.strftime('%m/%d (%a)')
+        
+        date_actions.append(PostbackTemplateAction(
+            label=display_str,
+            data=f'date_{date_str}'
+        ))
+    
+    # 另一種方式是使用日期選擇器
+    date_actions.append(DatetimePickerTemplateAction(
+        label='選擇其他日期',
+        data='datetime_picker',
+        mode='date',
+        initial=today.strftime('%Y-%m-%d'),
+        min=today.strftime('%Y-%m-%d'),
+        max=(today + datetime.timedelta(days=30)).strftime('%Y-%m-%d')
+    ))
+    
+    carousel_template = CarouselTemplate(
+        columns=[
+            CarouselColumn(
+                title='選擇日期',
+                text='請選擇預約日期',
+                actions=date_actions[:3]
+            ),
+            CarouselColumn(
+                title='選擇日期',
+                text='請選擇預約日期',
+                actions=date_actions[3:6]
+            )
+        ]
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='選擇日期',
+        template=carousel_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def show_time_selection(event, user_id):
+    time_slots = ['10:00', '11:00', '12:00', '13:00', '14:00', '15:00', '16:00', '17:00', '18:00']
+    time_actions = []
+    
+    for time in time_slots:
+        time_actions.append(PostbackTemplateAction(
+            label=time,
+            data=f'time_{time}'
+        ))
+    
+    carousel_template = CarouselTemplate(
+        columns=[
+            CarouselColumn(
+                title='選擇時間',
+                text='上午/中午',
+                actions=time_actions[:3]
+            ),
+            CarouselColumn(
+                title='選擇時間',
+                text='下午',
+                actions=time_actions[3:6]
+            ),
+            CarouselColumn(
+                title='選擇時間',
+                text='傍晚',
+                actions=time_actions[6:9]
+            )
+        ]
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='選擇時間',
+        template=carousel_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def show_booking_confirmation(event, user_id):
+    state = user_states[user_id]
+    shop_name = shops[state['shop']]['name']
+    stylist = stylists[state['shop']].get(state['stylist'], '不指定設計師') if state['stylist'] != 'any' else '不指定設計師'
+    
+    confirm_text = f"請確認您的預約資訊：\n\n" \
+                  f"姓名：{state.get('customer_name', '未提供')}\n" \
+                  f"服務項目：{state['service']}\n" \
+                  f"預約店鋪：{shop_name}\n" \
+                  f"預約設計師：{stylist}\n" \
+                  f"預約日期：{state['date']}\n" \
+                  f"預約時間：{state['time']}"
+    
+    buttons_template = ButtonsTemplate(
+        title='確認預約',
+        text=confirm_text,
+        actions=[
+            MessageTemplateAction(label='確認預約', text='確認預約'),
+            MessageTemplateAction(label='取消預約', text='取消預約')
+        ]
+    )
+    
+    template_message = TemplateSendMessage(
+        alt_text='確認預約',
+        template=buttons_template
+    )
+    
+    line_bot_api.reply_message(event.reply_token, template_message)
+
+def confirm_booking(event, user_id):
+    state = user_states[user_id]
+    shop_name = shops[state['shop']]['name']
+    stylist = stylists[state['shop']].get(state['stylist'], '不指定設計師') if state['stylist'] != 'any' else '不指定設計師'
+    
+    # 檢查Google Calendar API環境變數
+    if GOOGLE_CALENDAR_CLIENT_ID and GOOGLE_CALENDAR_CLIENT_SECRET and GOOGLE_CALENDAR_REDIRECT_URI:
+        # 創建暫存預約信息，等待Google Calendar授權
+        booking_uuid = str(uuid.uuid4())
+        
+        # 保存預約信息
+        pending_bookings[booking_uuid] = {
+            'user_id': user_id,
+            'customer_name': state.get('customer_name', '未提供姓名'),
+            'service': state['service'],
+            'shop': shop_name,
+            'stylist': stylist,
+            'date': state['date'],
+            'time': state['time'],
+            'status': 'pending'
+        }
+        
+        # 生成Google OAuth授權URL
+        oauth_url = "https://accounts.google.com/o/oauth2/v2/auth?" + urlencode({
+            'client_id': GOOGLE_CALENDAR_CLIENT_ID,
+            'redirect_uri': GOOGLE_CALENDAR_REDIRECT_URI,
+            'response_type': 'code',
+            'scope': 'https://www.googleapis.com/auth/calendar',
+            'state': booking_uuid,
+            'access_type': 'offline',
+            'prompt': 'consent'
+        })
+        
+        # 發送授權請求連結
         buttons_template = ButtonsTemplate(
-            title=f'{category}服務',
-            text='請選擇具體服務項目',
+            title='連結到Google日曆',
+            text='請點擊下方按鈕連結到Google日曆，以完成預約',
             actions=[
-                PostbackTemplateAction(
-                    label=service,
-                    data=f"service_{category}_{service}"
-                ) for service in service_items
+                URITemplateAction(
+                    label='連結Google日曆',
+                    uri=oauth_url
+                )
             ]
         )
-        template_message = TemplateSendMessage(
-            alt_text='服務項目選擇',
-            template=buttons_template
-        )
-        line_bot_api.reply_message(event.reply_token, template_message)
-    
-    # 處理服務項目選擇
-    elif data.startswith("service_"):
-        _, category, service = data.split("_", 2)
-        
-        # 儲存用戶選擇的服務
-        if user_id not in bookings:
-            bookings[user_id] = {}
-        
-        bookings[user_id]['category'] = category
-        bookings[user_id]['service'] = service
-        
-        # 提供日期選擇
-        date_picker = DatetimePickerTemplateAction(
-            label='選擇日期',
-            data='action=date_picker',
-            mode='date',
-            initial=datetime.now().strftime('%Y-%m-%d'),
-            min=datetime.now().strftime('%Y-%m-%d'),
-            max=(datetime.now() + timedelta(days=30)).strftime('%Y-%m-%d')
-        )
-        
-        buttons_template = ButtonsTemplate(
-            title='選擇預約日期',
-            text=f'您選擇了: {category} - {service}\n請選擇預約日期',
-            actions=[date_picker]
-        )
         
         template_message = TemplateSendMessage(
-            alt_text='日期選擇',
+            alt_text='連結Google日曆',
             template=buttons_template
         )
         
         line_bot_api.reply_message(event.reply_token, template_message)
-    
-    # 處理日期選擇
-    elif data == 'action=date_picker':
-        selected_date = event.postback.params['date']
+    else:
+        # 若未設置Google Calendar API，直接確認預約
+        booking_info = {
+            'user_id': user_id,
+            'customer_name': state.get('customer_name', '未提供姓名'),
+            'service': state['service'],
+            'shop': shop_name,
+            'stylist': stylist,
+            'date': state['date'],
+            'time': state['time'],
+            'status': 'confirmed'
+        }
         
-        # 儲存選擇的日期
-        bookings[user_id]['date'] = selected_date
+        # 在實際應用中，這裡應該將預約信息保存到數據庫
         
-        # 提供時間選擇
-        available_times = []
-        for hour in range(business_hours['start'], business_hours['end']):
-            for minute in [0, 30]:  # 假設每30分鐘一個時段
-                time_str = f"{hour:02d}:{minute:02d}"
-                available_times.append(time_str)
-        
-        # 由於 LINE 按鈕模板限制，最多只能顯示 4 個按鈕
-        # 這裡簡化為只顯示部分時間段
-        display_times = available_times[:4]  # 實際應用中可能需要分頁或其他解決方案
-        
-        buttons_template = ButtonsTemplate(
-            title='選擇預約時間',
-            text=f'預約日期: {selected_date}\n請選擇時間段',
-            actions=[
-                PostbackTemplateAction(
-                    label=time_str,
-                    data=f"time_{time_str}"
-                ) for time_str in display_times
-            ]
-        )
-        
-        template_message = TemplateSendMessage(
-            alt_text='時間選擇',
-            template=buttons_template
-        )
-        
-        line_bot_api.reply_message(event.reply_token, template_message)
-    
-    # 處理時間選擇
-    elif data.startswith("time_"):
-        selected_time = data.replace("time_", "")
-        
-        # 儲存選擇的時間
-        bookings[user_id]['time'] = selected_time
-        
-        # 完成預約
-        booking_info = bookings[user_id]
-        confirmation_message = f"您的預約已確認!\n\n服務: {booking_info['category']} - {booking_info['service']}\n日期: {booking_info['date']}\n時間: {booking_info['time']}\n\n如需變更，請輸入「取消預約」後重新預約。"
+        # 發送預約成功通知
+        success_message = f"預約成功！\n\n" \
+                         f"服務項目：{state['service']}\n" \
+                         f"預約店鋪：{shop_name}\n" \
+                         f"預約設計師：{stylist}\n" \
+                         f"預約日期：{state['date']}\n" \
+                         f"預約時間：{state['time']}\n\n" \
+                         f"期待您的光臨！"
         
         line_bot_api.reply_message(
             event.reply_token,
-            TextSendMessage(text=confirmation_message)
+            TextSendMessage(text=success_message)
         )
+        
+        # 重置用戶狀態
+        user_states[user_id] = {
+            'step': 'init',
+            'shop': None,
+            'service': None,
+            'stylist': None,
+            'date': None,
+            'time': None
+        }
 
 if __name__ == "__main__":
-    channel_secret = '3d4224a4cb32b140610545e6d155cc0d'
-    channel_access_token = 'YCffcEj/7aUw33XPEtfVMuKf1l5i5ztIHLibGTy2zGuyNgLf1RXJCqA8dVhbMp8Yxbwsr1CP6EfJID8htKS/Q3io/WSfp/gtDcaRfDT/TNErwymfiIdGWdLROcBkTfRN7hXFqHVrDQ+WgkkMGFWc3AdB04t89/1O/w1cDnyilFU='
     port = int(os.environ.get('PORT', 5000))
-    app.run(host='0.0.0.0', port=port)
+    app.run(host='0.0.0.0', port=port) 
