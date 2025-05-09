@@ -1,0 +1,65 @@
+<!DOCTYPE html>
+<html lang="zh-Hant">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>確認預約資訊 - 大皇再生煥采</title>
+    <link rel="stylesheet" href="css/booking-confirmation-styles.css">
+    <style>
+        /* 新增/調整 confirmation-notice 樣式 */
+        .confirmation-notice {
+            font-size: 0.85em;
+            color: #777;
+            margin-top: 10px; /* 調整上方間距 */
+            line-height: 1.4;
+        }
+        .confirmation-notice.important-notice { /* 重要提醒的樣式 */
+            color: #67318e; /* 紫色，使其更醒目 */
+            font-weight: bold;
+            margin-top: 15px; /* 與上方按鈕間距拉大一點 */
+        }
+        .confirmation-notice.secondary-notice { /* 次要提醒的樣式 */
+            font-size: 0.8em;
+            margin-top: 8px;
+        }
+    </style>
+</head>
+<body>
+
+    <div class="confirmation-container">
+        <h2 class="page-title">請確認您的預約資訊</h2>
+
+        <div class="booking-summary">
+            <div class="summary-item">
+                <span class="summary-label">服務項目：</span>
+                <span id="summary-service-name" class="summary-value">載入中...</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">選擇分店：</span>
+                <span id="summary-store-name" class="summary-value">載入中...</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">美容師：</span>
+                <span id="summary-beautician-name" class="summary-value">載入中...</span>
+            </div>
+            <div class="summary-item">
+                <span class="summary-label">預約時間：</span>
+                <span id="summary-datetime" class="summary-value">載入中...</span>
+            </div>
+            </div>
+
+        <button class="confirm-booking-btn" id="confirm-booking-btn">確認預約並送出</button>
+        <p class="confirmation-notice">提醒您，點擊確認後，系統將為您送出預約需求。</p>
+        <p class="confirmation-notice important-notice">您的預約需求送出後，將由美容師本人查看並儘快回覆確認，敬請耐心等候。</p>
+        <p class="confirmation-notice secondary-notice">您隨時可以透過「查詢預約」確認最新的預約狀態，或透過「查詢剩餘堂數」了解您的服務權益。</p>
+    </div>
+
+    <div class="navigation-buttons">
+        <button onclick="history.back()" class="nav-button">返回修改</button>
+        <a href="index.html" class="nav-button">取消預約 (回主選單)</a>
+    </div>
+
+    <script charset="utf-8" src="https://static.line-scdn.net/liff/edge/2/sdk.js"></script>
+    <script src="js/booking-confirmation.js"></script>
+</body>
+</html>
