@@ -1,0 +1,121 @@
+/* css/select-timeslot-styles.css */
+body {
+    font-family: sans-serif;
+    margin: 0;
+    padding: 20px;
+    background-color: #f4f4f4;
+    padding-bottom: 80px; /* 為底部按鈕留空間 */
+}
+
+.page-title {
+    text-align: center;
+    color: #67318e;
+    margin-bottom: 15px;
+    font-size: 1.3em;
+    line-height: 1.4;
+}
+.page-title span {
+    display: block;
+    font-size: 0.85em;
+    color: #555;
+    margin-top: 3px;
+}
+
+.date-selector-container {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    margin-bottom: 20px;
+    padding: 10px;
+    background-color: #fff;
+    border-radius: 8px;
+    box-shadow: 0 2px 4px rgba(0,0,0,0.05);
+}
+
+.date-selector-container button {
+    background-color: #67318e;
+    color: white;
+    border: none;
+    padding: 8px 12px;
+    border-radius: 5px;
+    cursor: pointer;
+}
+.date-selector-container button:hover {
+    background-color: #512771;
+}
+.date-selector-container button:disabled {
+    background-color: #ccc;
+    cursor: not-allowed;
+}
+
+#current-date-display {
+    font-weight: bold;
+    font-size: 1.1em;
+    color: #333;
+}
+
+.timeslot-list-container {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(100px, 1fr)); /* 每行盡可能多放按鈕 */
+    gap: 10px;
+    margin-bottom: 20px;
+}
+
+.timeslot-btn {
+    background-color: #ffffff;
+    color: #67318e;
+    border: 1px solid #67318e;
+    padding: 12px 10px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 1em;
+    text-align: center;
+    transition: background-color 0.3s ease, color 0.3s ease;
+}
+
+.timeslot-btn:hover {
+    background-color: #67318e;
+    color: white;
+}
+
+.timeslot-btn.booked { /* 已被預約的樣式 (可選) */
+    background-color: #e0e0e0;
+    color: #aaa;
+    border-color: #ccc;
+    cursor: not-allowed;
+}
+
+.loading-message, .no-slots-message {
+    text-align: center;
+    color: #777;
+    padding: 20px;
+}
+
+/* 底部導航按鈕容器樣式 (與其他頁面相同) */
+.navigation-buttons {
+    position: fixed;
+    bottom: 0;
+    left: 0;
+    width: 100%;
+    background-color: #f0f0f0;
+    padding: 10px 0;
+    box-shadow: 0 -2px 5px rgba(0,0,0,0.1);
+    display: flex;
+    justify-content: space-around;
+    z-index: 1000;
+}
+
+.nav-button {
+    padding: 10px 20px;
+    background-color: #67318e;
+    color: white;
+    text-decoration: none;
+    border-radius: 5px;
+    text-align: center;
+    border: none;
+    cursor: pointer;
+    font-size: 0.9em;
+}
+.nav-button:hover {
+    background-color: #512771;
+}
